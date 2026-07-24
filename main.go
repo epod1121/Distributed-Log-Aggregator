@@ -28,7 +28,12 @@ func main() {
 	fmt.Print("Starting Program...")
 
 	// start broker server
-	startServer()
+	go startServer()
+
+	// sleep to allow connection to open
+	time.Sleep(100 * time.Millisecond)
+
+	go processLog("localhost:9092", "payment", 0)
 
 	// start producer
 	producer, err := newLogProducer("localhost:9092")
@@ -75,7 +80,7 @@ func newSignUp(producer *Producer) {
 }
 
 func payment(producer *Producer) {
-	randomInt := string(rand.Intn(1000))
+	randomInt := strconv.Itoa(rand.Intn(1000))
 	err := producer.send("Checkout", time.Now().Format(time.RFC1123), "payment", randomInt)
 	if err != nil {
 		fmt.Println("An error occurred sending a log")
@@ -173,7 +178,6 @@ func startServer() {
 // determines if incoming connection is producer or consumer
 func handleConnection(conn net.Conn) {
 
-	defer conn.Close()
 	idBuffer := make([]byte, 1)
 
 	_, err := conn.Read(idBuffer)
@@ -345,12 +349,7 @@ func streamLogs(conn net.Conn) {
 	}
 
 	// need to send data directly to consumer over tcp connection
-	// here just as a placeholder
-	_, err = conn.Write(buf)
-	if err != nil {
-		fmt.Println("Error streaming log")
-		return
-	}
+	conn.Write(buf)
 }
 
 // reads the length of the file when passed to acceptLog()
@@ -464,8 +463,6 @@ func processLog(address string, topic string, startOffset int64) {
 		}
 
 		// print log to terminal
-		fmt.Print("\033[?25l")
-
 		// update terminal
 		fmt.Print("\033[H\033[J")
 		fmt.Println("==================================================")
