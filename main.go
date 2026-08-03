@@ -126,6 +126,12 @@ func newLogProducer(address string) (*Producer, error){
 // package and ships a single log
 func (p *Producer) send(from string, time string, topic string, message string) error {
 
+	conn, err := net.Dial("tcp", "localhost:9092")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
 	// take the time, topic, and message and turn them into protobuf
 	log := &pb.Log {
 		From:		from,
@@ -204,6 +210,7 @@ func handleConnection(conn net.Conn) {
 	_, err := conn.Read(idBuffer)
 	if err != nil {
 		fmt.Println("Failed to read id")
+		conn.Close()
 		return
 	}
 
@@ -212,15 +219,14 @@ func handleConnection(conn net.Conn) {
 	switch connectionType {
 	case 1:
 		acceptLog(conn)
+		conn.Close()
 
 	case 2:
 		streamLogs(conn)
-		return
 
 	default:
 		fmt.Println("Unknown connection type")
 		conn.Close()
-		return
 	}
 
 }
@@ -472,9 +478,10 @@ func processLog(address string, topic string, stats *SystemStats) {
 		}
 
 		// tell the broker it is a consumer
-		_, err = conn.Write([]byte{2})
-		if err != nil {
-			return
+		if _, err = conn.Write([]byte{2}); err != nil {
+			conn.Close()
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
 
 		// send length of topic as well as the string
@@ -494,9 +501,11 @@ func processLog(address string, topic string, stats *SystemStats) {
 		// create buffer to receive log from broker
 		buf := make([]byte, 1024)
 		n, err := conn.Read(buf)
-		if err != nil {
-			fmt.Println("Error reading buffer from broker")
-			return
+		conn.Close()
+
+		if err != nil || n == 0 {
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
 
 		// unmarshal protobuf
@@ -543,7 +552,7 @@ func runUI(stats *SystemStats) {
         fmt.Printf(" Total Sign Ups                : %v\n", signUps)
         fmt.Println("==================================================")
 		fmt.Printf(" Total Uptime                  : %v\n", time.Since(upTime).Round(time.Second))
-		fmt.Printf(" Latest Event				   : %s\n", lastEvent)
+		fmt.Printf(" Latest Event		       : %s\n", lastEvent)
 
 		// sleep for just a couple seconds
 		time.Sleep(50 * time.Millisecond)
