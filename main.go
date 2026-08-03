@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/epod1121/Log-Aggregator/.gitignore/pb"
@@ -15,9 +16,20 @@ import (
 )
 
 var (
-	offsetByteMap = make(map[int]int64)
-	offset = len(offsetByteMap)
+	topicOffsetMap = make(map[string]map[int]int64)
+	topicOffsetCount = make(map[string]int)
+	offsetMutex sync.Mutex
 )
+
+type SystemStats struct {
+	sync.Mutex
+	Logs int
+	Added int
+	Checkouts int
+	Income int
+	SignUps int
+	LastEvent string
+}
 
 // open up producer connection
 type Producer struct {
@@ -33,7 +45,16 @@ func main() {
 	// sleep to allow connection to open
 	time.Sleep(100 * time.Millisecond)
 
-	go processLog("localhost:9092", "payment", 0)
+	// create a shared stats instance
+	stats := &SystemStats{}
+
+	// start logs flowing
+	go processLog("localhost:9092", "payment", stats)
+	go processLog("localhost:9092", "add to cart", stats)
+	go processLog("localhost:9092", "new sign up", stats)
+
+	// start terminal UI
+	go runUI(stats)
 
 	// start producer
 	producer, err := newLogProducer("localhost:9092")
@@ -194,9 +215,12 @@ func handleConnection(conn net.Conn) {
 
 	case 2:
 		streamLogs(conn)
+		return
 
 	default:
 		fmt.Println("Unknown connection type")
+		conn.Close()
+		return
 	}
 
 }
@@ -258,11 +282,21 @@ func acceptLog(conn net.Conn) {
 		return
 	}
 
-	nextByte := fileSize.Size()
+	// lock to prevent weird changes
+	offsetMutex.Lock()
+	// if the topicOffsetMap does not exist, make one
+	if topicOffsetMap[fileTopic] == nil {
+		topicOffsetMap[fileTopic] = make(map[int]int64)
+	}
 
-	// save key value pair [offset]byte
-	offsetByteMap[offset] = nextByte
-	offset++
+	// current offset of topic is most recently appended topic to map
+	currentOffset := topicOffsetCount[fileTopic]
+	// the current offset of the current topic is where this log begins
+	topicOffsetMap[fileTopic][currentOffset] = fileSize.Size()
+	// increment the file topic offset
+	topicOffsetCount[fileTopic]++
+	// unlock to allow next thread to edit
+	offsetMutex.Unlock()
 
 	// send the file and the data to persist to it to save to disk
 	persistLog(file, dataBuf)
@@ -272,13 +306,7 @@ func acceptLog(conn net.Conn) {
 func persistLog(file *os.File, data []byte) {
 
 	// write the bytes to the file
-	success, err := file.Write(data)
-	if err != nil {
-		fmt.Println("Error persisting data")
-		return
-	}
-
-	fmt.Printf("Wrote %v bytes to disk\n", success)
+	file.Write(data)
 	file.Sync()
 }
 
@@ -308,7 +336,24 @@ func streamLogs(conn net.Conn) {
 		fmt.Println("Error reading start offset")
 		return
 	}
-	targetByte := offsetByteMap[int(startOffset)]
+
+	// lock to prevent weird edits
+	offsetMutex.Lock()
+	// make sure the topic's offset map exists
+	offsetForTopic, exists := topicOffsetMap[fileTopic]
+	if !exists {
+		fmt.Println("Topic offset map does not exist")
+		offsetMutex.Unlock()
+		return
+	}
+	// make sure topic's requested offset index exists and produce the target byte off of that
+	targetByte, exists := offsetForTopic[int(startOffset)]
+	offsetMutex.Unlock()
+
+	// return if it does not exist
+	if !exists {
+		return
+	}
 
 	// open folder / file for streaming
 	filename := fmt.Sprintf("Logs/%s.log", fileTopic)
@@ -325,21 +370,28 @@ func streamLogs(conn net.Conn) {
 		return
 	}
 
-	// get the length of how long the requested streamed message is
-	// while checking to see if the index is out of bounds
+	// lock to prevent weird edits
+	offsetMutex.Lock()
+	// init variable
 	var messageLength int64
 
-	nextByte, exists := offsetByteMap[int(startOffset) + 1]
-	if exists {
+	// check to see if there is a message next to the one being streamed
+	nextByte, nextExists := offsetForTopic[int(startOffset)+1]
+	// if so, find the length by subtracting start and current byte
+	if nextExists {
 		messageLength = nextByte - targetByte
 	} else {
+		// get total file size
 		fileInfo, err := file.Stat()
 		if err != nil {
-			fmt.Println("Error getting file stat")
+			offsetMutex.Unlock()
 			return
 		}
+		// if the log is at the end, read the rest of the file
 		messageLength = fileInfo.Size() - targetByte
 	}
+	// unlock to proceed
+	offsetMutex.Unlock()
 
 	buf := make([]byte, messageLength)
 
@@ -381,55 +433,64 @@ func readOffset(conn net.Conn) (int64, error) {
 // and process them
 // ======================================================================================
 
+// filter function to handle all topics
+// sends them to UI func
+func (s *SystemStats) filterAndProcess(log *pb.Log) {
+	s.Lock()
+	defer s.Unlock()
+
+	s.Logs++
+	s.LastEvent = fmt.Sprintf("[%s] %s", log.Topic, log.Message)
+
+	switch log.Topic {
+	case "add to cart":
+		s.Added++
+	case "new sign up":
+		s.SignUps++
+	case "payment":
+		s.Checkouts++
+		amount, err := strconv.Atoi(log.Message)
+		if err != nil {
+			fmt.Println("Error parsing payment")
+		}
+		s.Income += amount
+	}
+}
+
 // request data from a specific point in time
-func processLog(address string, topic string, startOffset int64) {
+func processLog(address string, topic string, stats *SystemStats) {
 
-	// connect to broker
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		fmt.Println("Error connecting consumer to broker")
-		return
-	}
-	defer conn.Close()
+	var currentOffset int64 = 0
 
-	// tell the broker it is a consumer
-	_, err = conn.Write([]byte{2})
-	if err != nil {
-		return
-	}
-
-	// send length of topic as well as the string
-	topicBytes := []byte(topic)
-	topicLenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(topicLenBuf, uint32(len(topicBytes)))
-
-	// write length and bytes to broker
-	conn.Write(topicLenBuf)
-	conn.Write(topicBytes)
-
-	// send the starting offset
-	offsetBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(offsetBuf, uint64(startOffset))
-	conn.Write(offsetBuf)
-
-
-
-	// now time to process the data
-	// and display it in the terminal!
-
-	// initiate variables that would be cool to keep track of
-	var logs int
-	var added int
-	var checkouts int
-	var income int
-	var signUps int
-
-	// keep track of uptime -- just something cool to have
-	upTime := time.Now()
-
-
-	// start a while loop that runs on forever (as long as the program runs)
 	for {
+
+		// connect to broker
+		conn, err := net.Dial("tcp", address)
+		if err != nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+
+		// tell the broker it is a consumer
+		_, err = conn.Write([]byte{2})
+		if err != nil {
+			return
+		}
+
+		// send length of topic as well as the string
+		topicBytes := []byte(topic)
+		topicLenBuf := make([]byte, 4)
+		binary.BigEndian.PutUint32(topicLenBuf, uint32(len(topicBytes)))
+
+		// write length and bytes to broker
+		conn.Write(topicLenBuf)
+		conn.Write(topicBytes)
+
+		// send the starting offset
+		offsetBuf := make([]byte, 8)
+		binary.BigEndian.PutUint64(offsetBuf, uint64(currentOffset))
+		conn.Write(offsetBuf)
+
 		// create buffer to receive log from broker
 		buf := make([]byte, 1024)
 		n, err := conn.Read(buf)
@@ -443,25 +504,32 @@ func processLog(address string, topic string, startOffset int64) {
 		err = proto.Unmarshal(buf[:n], log)
 		if err != nil {
 			fmt.Println("Error unmarshaling log")
-			return
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
 
-		// update variables
-		logs++
-		switch log.Topic {
-		case "new sign up":
-			signUps++
-		case "add to cart":
-			added++
-		case "payment":
-			checkouts++
-			amount, err := strconv.Atoi(log.Message)
-			if err != nil {
-				fmt.Println("Error parsing payment")
-			}
-			income += amount
-		}
+		// send unmarshaled log to filter
+		stats.filterAndProcess(log)
 
+		// increment offset for next topic request
+		currentOffset++
+	}
+}
+
+func runUI(stats *SystemStats) {
+	// keep track of uptime -- just something cool to have
+	upTime := time.Now()
+
+	for {
+		stats.Lock()
+		logs := stats.Logs
+		added := stats.Added
+		checkouts := stats.Checkouts
+		income := stats.Income
+		signUps := stats.SignUps
+		lastEvent := stats.LastEvent
+		stats.Unlock()
+		
 		// print log to terminal
 		// update terminal
 		fmt.Print("\033[H\033[J")
@@ -475,6 +543,7 @@ func processLog(address string, topic string, startOffset int64) {
         fmt.Printf(" Total Sign Ups                : %v\n", signUps)
         fmt.Println("==================================================")
 		fmt.Printf(" Total Uptime                  : %v\n", time.Since(upTime).Round(time.Second))
+		fmt.Printf(" Latest Event				   : %s\n", lastEvent)
 
 		// sleep for just a couple seconds
 		time.Sleep(50 * time.Millisecond)
