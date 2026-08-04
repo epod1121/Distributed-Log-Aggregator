@@ -6,13 +6,13 @@ A high-performance, lightweight distributed log aggregation engine written in Go
 
 ## Key Features
 
-* **Custom Wire Protocol:** Low-overhead TCP protocol using prefix-length headers for topics and data payloads.
-* **Protobuf Serialization:** Efficient binary payload serialization using Google Protocol Buffers (`.proto`).
-* **$O(1)$ Disk Indexing:** In-memory byte-offset mapping (`topicOffsetMap`) allowing instant file seeking (`file.Seek`) without scanning entire log files.
-* **Topic Isolation:** Automatic log partitioning into topic-specific storage files (`Logs/<topic>.log`).
-* **Concurrent TCP Broker:** Thread-safe, non-blocking connection handler capable of handling simultaneous producer writes and consumer reads via Go routines.
-* **Live Terminal UI:** In-place refreshing Linux terminal dashboard built using ANSI escape sequences (`\033[H\033[J`).
-* **Traffic Simulator:** Built-in multi-event simulator generating real-time e-commerce activity (Payments, Cart additions, User Sign-ups).
+* **Custom Wire Protocol:** Low-overhead TCP protocol using prefix-length headers for topics and data payloads
+* **Protobuf Serialization:** Efficient binary payload serialization using Google Protocol Buffers (`.proto`)
+* **$O(1)$ Disk Indexing:** In-memory byte-offset mapping (`topicOffsetMap`) allowing instant file seeking (`file.Seek`) without scanning entire log files
+* **Topic Isolation:** Automatic log partitioning into topic-specific storage files (`Logs/<topic>.log`)
+* **Concurrent TCP Broker:** Thread-safe, non-blocking connection handler capable of handling simultaneous producer writes and consumer reads via Go routines
+* **Live Terminal UI:** In-place refreshing Linux terminal dashboard built using ANSI escape sequences (`\033[H\033[J`)
+* **Traffic Simulator:** Built-in multi-event simulator generating real-time e-commerce activity (Payments, Cart additions, User Sign-ups)
 
 ---
 
