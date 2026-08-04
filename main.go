@@ -165,7 +165,7 @@ func (p *Producer) send(from string, time string, topic string, message string) 
     packet = append(packet, data...)
 
     // send in one single TCP write
-    _, err = p.conn.Write(packet)
+    _, err = conn.Write(packet)
     return err
 }
 
@@ -288,6 +288,9 @@ func acceptLog(conn net.Conn) {
 		return
 	}
 
+	// send the file and the data to persist to it to save to disk
+	persistLog(file, dataBuf)
+
 	// lock to prevent weird changes
 	offsetMutex.Lock()
 	// if the topicOffsetMap does not exist, make one
@@ -303,9 +306,6 @@ func acceptLog(conn net.Conn) {
 	topicOffsetCount[fileTopic]++
 	// unlock to allow next thread to edit
 	offsetMutex.Unlock()
-
-	// send the file and the data to persist to it to save to disk
-	persistLog(file, dataBuf)
 }
 
 // write the raw data to drive
@@ -352,12 +352,34 @@ func streamLogs(conn net.Conn) {
 		offsetMutex.Unlock()
 		return
 	}
+	
 	// make sure topic's requested offset index exists and produce the target byte off of that
 	targetByte, exists := offsetForTopic[int(startOffset)]
-	offsetMutex.Unlock()
-
 	// return if it does not exist
 	if !exists {
+		offsetMutex.Unlock()
+		return
+	}
+
+	// init variable
+	var messageLength int64
+	// check to see if there is a message next to the one being streamed
+	nextByte, nextExists := offsetForTopic[int(startOffset)+1]
+	// if so, find the length by subtracting start and current byte
+	if nextExists {
+		messageLength = nextByte - targetByte
+	} else {
+		filename := fmt.Sprintf("Logs/%s.log", fileTopic)
+		fileInfo, err := os.Stat(filename)
+		if err != nil {
+			offsetMutex.Unlock()
+			return
+		}
+		messageLength = fileInfo.Size() - targetByte
+	}
+	offsetMutex.Unlock()
+
+	if messageLength <= 0 {
 		return
 	}
 
@@ -376,31 +398,7 @@ func streamLogs(conn net.Conn) {
 		return
 	}
 
-	// lock to prevent weird edits
-	offsetMutex.Lock()
-	// init variable
-	var messageLength int64
-
-	// check to see if there is a message next to the one being streamed
-	nextByte, nextExists := offsetForTopic[int(startOffset)+1]
-	// if so, find the length by subtracting start and current byte
-	if nextExists {
-		messageLength = nextByte - targetByte
-	} else {
-		// get total file size
-		fileInfo, err := file.Stat()
-		if err != nil {
-			offsetMutex.Unlock()
-			return
-		}
-		// if the log is at the end, read the rest of the file
-		messageLength = fileInfo.Size() - targetByte
-	}
-	// unlock to proceed
-	offsetMutex.Unlock()
-
 	buf := make([]byte, messageLength)
-
 	_, err = file.Read(buf)
 	if err != nil {
 		fmt.Println("Error reading buffer")
@@ -426,7 +424,7 @@ func readOffset(conn net.Conn) (int64, error) {
 	buf := make([]byte, 8)
 	_, err := io.ReadFull(conn, buf)
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 
 	return int64(binary.BigEndian.Uint64(buf)), nil
