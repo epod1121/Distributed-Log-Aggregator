@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -22,6 +23,11 @@ var (
 	consumerMutex sync.Mutex
 	offsetMutex sync.Mutex
 )
+
+type IndexData struct {
+	Map map[string]map[int]int64 `json:"map"`
+	Count map[string]int `json:"count"`
+}
 
 type SystemStats struct {
 	sync.Mutex
@@ -51,9 +57,9 @@ func main() {
 	stats := &SystemStats{}
 
 	// start logs flowing
-	go processLog("localhost:9092", "payment", stats)
-	go processLog("localhost:9092", "add to cart", stats)
-	go processLog("localhost:9092", "new sign up", stats)
+	go processLog("localhost:9092","analytics-ui", "payment", stats)
+	go processLog("localhost:9092","analytics-ui", "add to cart", stats)
+	go processLog("localhost:9092","analytics-ui", "new sign up", stats)
 
 	// start terminal UI
 	go runUI(stats)
@@ -178,8 +184,63 @@ func (p *Producer) send(from string, time string, topic string, message string) 
 // into topics then persists them to disk
 // ======================================================================================
 
+// on startup to find where the last program instance left off
+func saveConsumerOffsetDisk() {
+	data, err := json.Marshal(consumerOffsets)
+	if err != nil {
+		return
+	}
+
+	_ = os.WriteFile("Logs/__consumer_offsets.json", data, 0644)
+}
+
+func loadConsumerOffsetDisk() {
+	data, err := os.ReadFile("Logs/__consumer_offsets.json")
+	if err != nil {
+		fmt.Println("Files does not exist")
+		return
+	}
+	_ = json.Unmarshal(data, &consumerOffsets)
+}
+
+func saveTopicIndexDisk() {
+	data, err := json.Marshal(IndexData{
+		Map: topicOffsetMap,
+		Count: topicOffsetCount,
+	})
+	if err != nil {
+		return
+	}
+
+	_ = os.WriteFile("Logs/__topic_index.json", data, 0644)
+}
+
+func loadTopicIndexDisk() {
+	data, err := os.ReadFile("Logs/__topic_index.json")
+	if err != nil {
+		fmt.Println("File does not exist")
+		return
+	}
+
+	var idx IndexData
+	if err := json.Unmarshal(data, &idx); err == nil {
+		if idx.Map != nil {
+			topicOffsetMap = idx.Map
+		}
+		if idx.Count != nil {
+			topicOffsetCount = idx.Count
+		}
+	}
+}
+
 // listens for incoming producers and consumers
 func startServer() {
+	
+	// make folder
+	_ = os.MkdirAll("Logs", 0755)
+
+	loadTopicIndexDisk()
+	loadConsumerOffsetDisk()
 
 	// open tcp port
 	ln, err := net.Listen("tcp", ":9092")
@@ -315,6 +376,9 @@ func acceptLog(conn net.Conn) {
 	topicOffsetMap[fileTopic][currentOffset] = fileSize.Size()
 	// increment the file topic offset
 	topicOffsetCount[fileTopic]++
+	
+	saveTopicIndexDisk()
+
 	// unlock to allow next thread to edit
 	offsetMutex.Unlock()
 }
@@ -543,6 +607,8 @@ func commitOffset(groupID string, topic string, offset int64) {
 		consumerOffsets[groupID] = make(map[string]int64)
 	}
 	consumerOffsets[groupID][topic] = offset
+
+	saveConsumerOffsetDisk()
 }
 
 
@@ -577,9 +643,12 @@ func (s *SystemStats) filterAndProcess(log *pb.Log) {
 }
 
 // request data from a specific point in time
-func processLog(address string, topic string, stats *SystemStats) {
+func processLog(address string, groupID string, topic string, stats *SystemStats) {
 
-	var currentOffset int64 = 0
+	// fund out where everything was last left off
+	currentOffset := fetchOffsetFromServer(address, groupID, topic)
+
+	fmt.Printf("[%s] Resuming %s from offset %d\n", groupID, topic, currentOffset)
 
 	for {
 
@@ -635,7 +704,81 @@ func processLog(address string, topic string, stats *SystemStats) {
 
 		// increment offset for next topic request
 		currentOffset++
+		_ = commitOffsetToServer(address, groupID, topic, currentOffset)
 	}
+}
+
+func fetchOffsetFromServer(address string, groupID string, topic string) int64 {
+
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		fmt.Println("Could not dial address")
+		return 0
+	}
+	defer conn.Close()
+
+	// send knock
+	conn.Write([]byte{3})
+
+	// send group ID, length, and string
+	groupBytes := []byte(groupID)
+	groupLenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(groupLenBuf, uint32(len(groupBytes)))
+	conn.Write(groupLenBuf)
+	conn.Write(groupBytes)
+
+	// send topic, length, and string
+	topicBytes := []byte(topic)
+	topicLenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(topicLenBuf, uint32(len(topicBytes)))
+	conn.Write(topicLenBuf)
+	conn.Write(topicBytes)
+
+	// read back 8 byte offset
+	buf := make([]byte, 8)
+	_, err = io.ReadFull(conn, buf)
+	if err != nil {
+		return 0
+	}
+
+	return int64(binary.BigEndian.Uint64(buf))
+}
+
+func commitOffsetToServer(address string, groupID string, topic string, offset int64) error {
+
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		fmt.Println("Could not dial address")
+		return err
+	}
+	defer conn.Close()
+
+	// send knock
+	conn.Write([]byte{4})
+
+	// send group ID, length, and string
+	groupBytes := []byte(groupID)
+	groupLenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(groupLenBuf, uint32(len(groupBytes)))
+	conn.Write(groupLenBuf)
+	conn.Write(groupBytes)
+
+	// send topic, length, and string
+	topicBytes := []byte(topic)
+	topicLenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(topicLenBuf, uint32(len(topicBytes)))
+	conn.Write(topicLenBuf)
+	conn.Write(topicBytes)
+
+	// send offset to commit
+	offsetBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(offsetBuf, uint64(offset))
+	conn.Write(offsetBuf)
+
+	// read 1 byte ACK
+	ack := make([]byte, 1)
+	_, err = conn.Read(ack)
+	return err
 }
 
 func runUI(stats *SystemStats) {
