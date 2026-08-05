@@ -18,6 +18,8 @@ import (
 var (
 	topicOffsetMap = make(map[string]map[int]int64)
 	topicOffsetCount = make(map[string]int)
+	consumerOffsets = make(map[string]map[string]int64)
+	consumerMutex sync.Mutex
 	offsetMutex sync.Mutex
 )
 
@@ -226,6 +228,12 @@ func handleConnection(conn net.Conn) {
 
 	case 2:
 		streamLogs(conn)
+
+	case 3:
+		handleFunctionOffset(conn)
+
+	case 4:
+		handleCommitOffset(conn)
 
 	default:
 		fmt.Println("Unknown connection type")
@@ -436,6 +444,107 @@ func readOffset(conn net.Conn) (int64, error) {
 	return int64(binary.BigEndian.Uint64(buf)), nil
 }
 
+// find out where offset was last left off
+func handleFunctionOffset(conn net.Conn){
+
+	// read group ID
+	groupIDLen, err := readLength(conn)
+	if err != nil {
+		fmt.Println("Could not read group ID")
+		return
+	}
+
+	groupIDBuf := make([]byte, groupIDLen)
+	
+	if _, err := io.ReadFull(conn, groupIDBuf); err != nil {
+		return
+	}
+	groupID := string(groupIDBuf)
+
+	// read topic
+	topicLen, err := readLength(conn)
+	if err != nil {
+		return
+	}
+
+	topicBuf := make([]byte, topicLen)
+	if _, err := io.ReadFull(conn, topicBuf); err != nil {
+		return
+	}
+	topic := string(topicBuf)
+
+	// get offset from map
+	offset := getCommittedOffset(groupID, topic)
+
+	// respond with 8 byte int64
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(offset))
+	conn.Write(buf)
+}
+
+func handleCommitOffset(conn net.Conn){
+	
+	// read group ID
+	groupIDLen, err := readLength(conn)
+	if err != nil {
+		fmt.Println("Could not read group ID")
+		return
+	}
+
+	groupIDBuf := make([]byte, groupIDLen)
+	
+	if _, err := io.ReadFull(conn, groupIDBuf); err != nil {
+		return
+	}
+	groupID := string(groupIDBuf)
+
+	// read topic
+	topicLen, err := readLength(conn)
+	if err != nil {
+		return
+	}
+
+	topicBuf := make([]byte, topicLen)
+	if _, err := io.ReadFull(conn, topicBuf); err != nil {
+		return
+	}
+	topic := string(topicBuf)
+
+	// read offset
+	committedOffset, err := readOffset(conn)
+	if err != nil {
+		return
+	}
+
+	// update memory
+	commitOffset(groupID, topic, committedOffset)
+
+	// send ACK back to consumer
+	conn.Write([]byte{1})
+}
+
+func getCommittedOffset(groupID string, topic string) int64 {
+
+	consumerMutex.Lock()
+	defer consumerMutex.Unlock()
+
+	if consumerOffsets[groupID] == nil {
+		// default to 0 if never committed before
+		return 0
+	}
+	return consumerOffsets[groupID][topic]
+}
+
+func commitOffset(groupID string, topic string, offset int64) {
+	consumerMutex.Lock()
+	defer consumerMutex.Unlock()
+
+	if consumerOffsets[groupID] == nil {
+		consumerOffsets[groupID] = make(map[string]int64)
+	}
+	consumerOffsets[groupID][topic] = offset
+}
+
 
 
 // ======================================================================================
@@ -562,8 +671,3 @@ func runUI(stats *SystemStats) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
-
-// Diagram of what it should look like
-// [Producers]  ──(TCP/Protobuf)──>  [Log Broker]  ──(Appends to Disk)
-//                                       │
-//                                       └──(Streams)──> [Consumers]
