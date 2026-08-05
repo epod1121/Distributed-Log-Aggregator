@@ -205,6 +205,9 @@ func startServer() {
 // determines if incoming connection is producer or consumer
 func handleConnection(conn net.Conn) {
 
+	// so no connection path leaks
+	defer conn.Close()
+
 	idBuffer := make([]byte, 1)
 
 	_, err := conn.Read(idBuffer)
@@ -318,6 +321,9 @@ func persistLog(file *os.File, data []byte) {
 
 // streams data from disk to consumer
 func streamLogs(conn net.Conn) {
+
+	// close the connection if offset doesn't exist
+	defer conn.Close()
 
 	// just like in acceptLog, get the file length and name from protobuf
 	// read topic from conn
