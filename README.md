@@ -89,7 +89,7 @@ go mod tidy
 go run main.go
 ```
 
-## What I learned through this project
+## What I Learned
 
 Dipping myself deeper into low-level coding as well as distributed systems, I learned many things:
 
