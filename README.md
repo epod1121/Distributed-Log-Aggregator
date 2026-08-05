@@ -62,13 +62,13 @@ All network communications occur over raw TCP (default port `:9092`). The broker
 3. Comput exact payload length: `messageLength = nextByte - targetByte`
 4. Open file, call `file.Seek(targetByte, io.SeekStart)` and read exact `messageLength` bytes using `io.ReadFull`
 
+## Getting Started
+
 ### Prerequisites
 
 **Go:** Version 1.20 or higher
 
 **Protocol Buffers Compiler (protoc):** Required only if modifying pb/log.proto
-
-## Getting Started
 
 ### Clone the Repository
 
